@@ -1,83 +1,87 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-const bodyParser = require('body-parser');
+const socketIo = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-
-app.use(cors());
-app.use(bodyParser.json());
-
-const io = new Server(server, {
+const io = socketIo(server, {
     cors: {
-        origin: "*",
+        origin: process.env.FRONTEND_URL || "*",
         methods: ["GET", "POST"]
-    },
+    }
 });
 
 const rooms = new Map();
 
 io.on('connection', (socket) => {
-    console.log('New connection established:', socket.id);
+    console.log('A user connected:', socket.id);
 
-    socket.on("create-room", (data) => {
-        const { roomId, streamerId } = data;
-        console.log(`Streamer ${streamerId} created room ${roomId}`);
+    socket.on('create-room', ({ roomId, streamerId }) => {
+        if (rooms.has(roomId)) {
+            socket.emit('error', { message: 'Room already exists' });
+            return;
+        }
         rooms.set(roomId, { streamerId, viewers: new Set() });
         socket.join(roomId);
-        socket.emit("room-created", { roomId });
+        io.emit('room-created', { roomId, streamerId });
+        console.log(`Room created: ${roomId} by streamer: ${streamerId}`);
     });
 
-    socket.on("join-room", (data) => {
-        const { roomId, viewerId } = data;
+    socket.on('join-room', ({ roomId, viewerId }) => {
         const room = rooms.get(roomId);
+        console.log(room , 'tinku saini')
         if (room) {
-            console.log(`Viewer ${viewerId} joined room ${roomId}`);
             room.viewers.add(viewerId);
             socket.join(roomId);
-            socket.to(roomId).emit("viewer-joined", { viewerId });
-            socket.emit("joined-room", { roomId });
+            io.to(roomId).emit('viewer-joined', { viewerId, totalViewers: room.viewers.size });
+            console.log(`Viewer ${viewerId} joined room ${roomId}`);
         } else {
-            socket.emit("room-not-found");
+            socket.emit('error', { message: 'Room not found' });
         }
     });
 
-    socket.on("send-offer", (data) => {
-        const { viewerId, offer } = data;
-        console.log(`Sending offer to viewer ${viewerId}`);
-        socket.to(viewerId).emit('receive-offer', { offer });
+    socket.on('send-offer', ({ roomId, viewerId, offer }) => {
+        const room = rooms.get(roomId);
+        if (room && room.viewers.has(viewerId)) {
+            io.to(viewerId).emit('receive-offer', { offer, roomId });
+        } else {
+            socket.emit('error', { message: 'Invalid room or viewer' });
+        }
     });
 
-    socket.on("send-answer", (data) => {
-        const { roomId, answer } = data;
-        console.log(`Sending answer to room ${roomId}`);
-        socket.to(roomId).emit('receive-answer', { answer });
+    socket.on('send-answer', ({ roomId, answer }) => {
+        const room = rooms.get(roomId);
+        if (room) {
+            io.to(room.streamerId).emit('receive-answer', { answer, roomId });
+        } else {
+            socket.emit('error', { message: 'Room not found' });
+        }
     });
 
-    socket.on("send-message", (data) => {
-        const { roomId, viewerId, message } = data;
-        console.log(`New message in room ${roomId} from ${viewerId}`);
-        socket.to(roomId).emit('new-message', { viewerId, message });
+    socket.on('send-message', ({ roomId, viewerId, message }) => {
+        const room = rooms.get(roomId);
+        if (room) {
+            io.to(roomId).emit('new-message', { viewerId, message });
+        } else {
+            socket.emit('error', { message: 'Room not found' });
+        }
     });
 
-    socket.on("disconnect", () => {
+    socket.on('disconnect', () => {
         rooms.forEach((room, roomId) => {
             if (room.streamerId === socket.id) {
-                console.log(`Streamer disconnected from room ${roomId}`);
-                io.to(roomId).emit("stream-ended");
+                io.to(roomId).emit('stream-ended', { roomId });
                 rooms.delete(roomId);
             } else if (room.viewers.has(socket.id)) {
-                console.log(`Viewer ${socket.id} disconnected from room ${roomId}`);
                 room.viewers.delete(socket.id);
-                socket.to(roomId).emit("viewer-left", { viewerId: socket.id });
+                io.to(roomId).emit('viewer-left', { viewerId: socket.id, totalViewers: room.viewers.size });
             }
         });
+        console.log('User disconnected:', socket.id);
     });
 });
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
